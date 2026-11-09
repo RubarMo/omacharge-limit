@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "rubar.omacharge-limit",
+  "name": "Omacharge Limit",
+  "version": "1.0.0",
+  "author": "rubar",
+  "license": "MIT",
+  "description": "Battery charge limit switch: 80% saver by default, one-shot 100% that reverts on unplug.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Charge Limit",
+    "description": "Charge limit mode: 80% saver or one-shot 100%.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

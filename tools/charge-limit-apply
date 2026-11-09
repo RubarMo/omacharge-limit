@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Root-owned write helper for the rubar.charge-limit bar widget.
+# Installed to /usr/local/bin/charge-limit-apply (root:root 0755) by
+# tools/install-helper.sh. Invoked via passwordless sudo from the shell:
+#   sudo -n /usr/local/bin/charge-limit-apply <start|end> <0-100>
+#
+# Only the two sysfs threshold files of the first present battery are ever
+# written. Arguments are strictly validated; nothing else runs as root.
+
+set -euo pipefail
+
+BAT=""
+for candidate in /sys/class/power_supply/BAT*; do
+  if [[ -f "$candidate/charge_control_end_threshold" ]]; then
+    BAT="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$BAT" ]]; then
+  echo "charge-limit-apply: no supported battery found" >&2
+  exit 1
+fi
+
+if (($# != 2)); then
+  echo "usage: charge-limit-apply <start|end> <0-100>" >&2
+  exit 2
+fi
+
+case "$1" in
+  start) file="$BAT/charge_control_start_threshold" ;;
+  end)   file="$BAT/charge_control_end_threshold" ;;
+  *)     echo "charge-limit-apply: kind must be start or end" >&2; exit 2 ;;
+esac
+
+if [[ ! "$2" =~ ^[0-9]{1,3}$ ]] || (( $2 < 0 || $2 > 100 )); then
+  echo "charge-limit-apply: value must be 0-100" >&2
+  exit 2
+fi
+
+echo "$2" > "$file"

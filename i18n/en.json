@@ -1,0 +1,14 @@
+{
+  "panel.title": "Omacharge Limit",
+  "panel.saver": "Battery saver",
+  "panel.saverCaption": "Stops at 80% · default",
+  "panel.full": "Full charge",
+  "panel.fullCaption": "One shot to 100% · back to 80% on unplug",
+  "panel.current": "Now",
+  "panel.applying": "Applying…",
+  "panel.errorNoInterface": "No charge-control interface on this machine",
+  "panel.errorWrite": "Could not change the limit",
+  "bar.tooltip": "Omacharge Limit",
+  "status.holdingFull": "Full charge armed",
+  "status.saver": "Battery saver"
+}
