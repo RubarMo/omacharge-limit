@@ -42,6 +42,14 @@ The widget polls sysfs every 15s (3s while panel is open) and watches `UPower.on
 - Omarchy Linux (Hyprland + Quickshell shell)
 - A battery with `charge_control_end_threshold` support (most modern laptops)
 
+## Remove
+
+```bash
+omarchy plugin remove rubar.omacharge-limit
+sudo rm /usr/local/bin/charge-limit-apply
+sudo rm /etc/sudoers.d/charge-limit
+```
+
 ## License
 
 MIT
