@@ -14,7 +14,7 @@ Battery charge limit switch for the Omarchy bar. Two modes:
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/rubar/omacharge-limit.git --enable
+omarchy plugin add https://github.com/RubarMo/omacharge-limit.git --enable
 ```
 
 Then run the one-time helper setup (needs sudo):
