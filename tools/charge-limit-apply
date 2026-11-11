@@ -4,20 +4,21 @@
 # tools/install-helper.sh. Invoked via passwordless sudo from the shell:
 #   sudo -n /usr/local/bin/charge-limit-apply <check|saver|full>
 #
-# Writes only the two charge-threshold sysfs files of the first battery that
+# Writes only the charge-threshold sysfs files of the first battery that
 # exposes them; arguments are strictly validated; nothing else runs as root.
 #
-# Why one invocation for the whole mode change: the EC rejects a threshold
-# write that would leave start >= end (EINVAL), and its registers can read
-# stale for a couple of seconds right after a write. The helper therefore
-#   * reads fresh state before every attempt and orders the writes so the
-#     start < end invariant holds at each step,
-#   * skips writes whose value already matches,
-#   * verifies the settled result and retries the whole attempt a few times
-#     before giving up.
-#
-# CHARGE_LIMIT_SYSFS overrides the power_supply root (testing only; sudo
-# scrubs the environment, so it is inert for the privileged invocation).
+# Design notes:
+#   * The kernel rejects a threshold write that would leave start >= end,
+#     so before lowering end the helper first drops a conflicting start
+#     threshold. In the common case ONLY the end threshold is written —
+#     one EC transaction per mode change.
+#   * The EC churns for a moment after a write and can report stale values;
+#     the helper therefore does NOT read back after a successful write pass
+#     (polling a busy EC stalls the kernel and, on ThinkPads, EC-sourced
+#     input). Verification is left to the widget's regular polling.
+#   * CHARGE_LIMIT_SYSFS overrides the power_supply root (testing only;
+#     sudo scrubs the environment, so it is inert for the privileged
+#     invocation).
 
 set -euo pipefail
 
@@ -46,8 +47,8 @@ fi
 
 case "$1" in
   check) : ;;
-  saver) TARGET_END=80; TARGET_START=75 ;;
-  full)  TARGET_END=100; TARGET_START=99 ;;
+  saver) TARGET_END=80 ;;
+  full)  TARGET_END=100 ;;
   *) echo "charge-limit-apply: mode must be check, saver or full" >&2; exit 2 ;;
 esac
 
@@ -61,37 +62,19 @@ read_pair() {
   printf '%s %s\n' "$end" "$start"
 }
 
-# One ordered write pass based on a fresh read. Returns non-zero when a
-# needed write was rejected by the kernel/EC.
+# One write pass from a fresh read. Returns non-zero when a needed write
+# was rejected by the kernel/EC.
 write_pass() {
   local cur cur_end cur_start
   cur="$(read_pair)" || return 1
   cur_end="${cur%% *}"; cur_start="${cur##* }"
 
-  if (( cur_start > TARGET_START )); then
-    # Lowering start first keeps start < end while the end drops.
-    (( cur_start == TARGET_START )) || { echo "$TARGET_START" > "$START_FILE" || return 1; }
-    (( cur_end == TARGET_END ))     || { echo "$TARGET_END"   > "$END_FILE"   || return 1; }
-  else
-    (( cur_end == TARGET_END ))     || { echo "$TARGET_END"   > "$END_FILE"   || return 1; }
-    (( cur_start == TARGET_START )) || { echo "$TARGET_START" > "$START_FILE" || return 1; }
+  if (( cur_start >= TARGET_END )); then
+    # A conflicting start threshold must drop before end can.
+    (( cur_start == 75 )) || { echo "75" > "$START_FILE" || return 1; }
   fi
+  (( cur_end == TARGET_END )) || { echo "$TARGET_END" > "$END_FILE" || return 1; }
   return 0
-}
-
-# Wait for the EC to settle and confirm the target pair. The first check is
-# immediate so a no-op mode change exits fast.
-verify() {
-  local i cur cur_end cur_start
-  for ((i = 0; i < 6; i++)); do
-    cur="$(read_pair)" || { sleep 1; continue; }
-    cur_end="${cur%% *}"; cur_start="${cur##* }"
-    if (( cur_end == TARGET_END && cur_start == TARGET_START )); then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
 }
 
 if [[ "$MODE" == "check" ]]; then
@@ -103,15 +86,15 @@ if [[ "$MODE" == "check" ]]; then
   exit 1
 fi
 
-for ((attempt = 1; attempt <= 4; attempt++)); do
-  if ! write_pass; then
-    sleep 1  # let any in-flight EC transaction settle, then recompute the order
-    continue
-  fi
-  if verify; then
+# A rejection means the fresh read raced an in-flight EC transaction; give
+# it a second to settle, re-read and recompute. Verification of the final
+# state is deliberately NOT done here (see design notes).
+for ((attempt = 1; attempt <= 3; attempt++)); do
+  if write_pass; then
     exit 0
   fi
+  sleep 1
 done
 
-echo "charge-limit-apply: could not apply $MODE thresholds on $BAT" >&2
+echo "charge-limit-apply: could not write $MODE thresholds on $BAT" >&2
 exit 1

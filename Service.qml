@@ -28,6 +28,9 @@ Item {
   // 100% limit; cleared once a read confirms the limit is no longer full.
   property bool revertPending: false
   property int revertAttempts: 0
+  // True for a few seconds after a write: the EC churns and reports stale
+  // values, so reads are not trusted for mode changes in that window.
+  property bool settling: false
 
   readonly property string sysfsDir: "/sys/class/power_supply/BAT0"
   readonly property string endPath: sysfsDir + "/charge_control_end_threshold"
@@ -71,7 +74,7 @@ Item {
     if (!revertPending) return false
     if (revertAttempts >= maxRevertAttempts) return false
     if (!UPower.onBattery) return false
-    if (busy || writeProc.running) return false
+    if (busy || writeProc.running || settling) return false
     if (endLimit !== 100 || mode !== "full") return false
     if (!applyMode("saver")) return false
     revertAttempts++
@@ -101,11 +104,11 @@ Item {
       root.readFailures = 0
       root.supported = true
       root.endLimit = end
-      if (!root.busy) root.mode = Model.modeFor(end)
+      if (!root.busy && !root.settling) root.mode = Model.modeFor(end)
       // Charger left and the EC still reads 100: dispatch the owed revert.
-      // Reads that land mid-apply are skipped by the busy guards; the
-      // post-apply refresh re-checks.
-      if (root.revertPending && !root.busy && !writeProc.running) {
+      // Reads that land mid-apply or mid-settle are skipped by the guards;
+      // the post-settle refresh re-checks.
+      if (root.revertPending && !root.busy && !root.settling && !writeProc.running) {
         if (end !== 100) root.revertPending = false
         else root.revertToSaver()
       }
@@ -128,8 +131,21 @@ Item {
         if (applied === "saver") root.revertPending = true
         return
       }
-      // The helper verified the settled EC state before exiting, so the
-      // values are readable back reliably right away.
+      // The helper exits right after its writes; the EC keeps churning for
+      // a moment and reads back stale. Give it time to settle before the
+      // confirming refresh instead of hammering it with reads.
+      root.settling = true
+      settleTimer.restart()
+    }
+  }
+
+  // Post-write settle window: reads during it are not trusted for mode
+  // changes; this refresh is the authoritative confirmation.
+  Timer {
+    id: settleTimer
+    interval: 3000
+    onTriggered: {
+      root.settling = false
       root.refresh()
     }
   }
