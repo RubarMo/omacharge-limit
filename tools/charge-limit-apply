@@ -2,15 +2,29 @@
 # Root-owned write helper for the rubar.charge-limit bar widget.
 # Installed to /usr/local/bin/charge-limit-apply (root:root 0755) by
 # tools/install-helper.sh. Invoked via passwordless sudo from the shell:
-#   sudo -n /usr/local/bin/charge-limit-apply <start|end> <0-100>
+#   sudo -n /usr/local/bin/charge-limit-apply <check|saver|full>
 #
-# Only the two sysfs threshold files of the first present battery are ever
-# written. Arguments are strictly validated; nothing else runs as root.
+# Writes only the two charge-threshold sysfs files of the first battery that
+# exposes them; arguments are strictly validated; nothing else runs as root.
+#
+# Why one invocation for the whole mode change: the EC rejects a threshold
+# write that would leave start >= end (EINVAL), and its registers can read
+# stale for a couple of seconds right after a write. The helper therefore
+#   * reads fresh state before every attempt and orders the writes so the
+#     start < end invariant holds at each step,
+#   * skips writes whose value already matches,
+#   * verifies the settled result and retries the whole attempt a few times
+#     before giving up.
+#
+# CHARGE_LIMIT_SYSFS overrides the power_supply root (testing only; sudo
+# scrubs the environment, so it is inert for the privileged invocation).
 
 set -euo pipefail
 
+SYSFS_ROOT="${CHARGE_LIMIT_SYSFS:-/sys/class/power_supply}"
+
 BAT=""
-for candidate in /sys/class/power_supply/BAT*; do
+for candidate in "$SYSFS_ROOT"/BAT*; do
   if [[ -f "$candidate/charge_control_end_threshold" ]]; then
     BAT="$candidate"
     break
@@ -22,20 +36,82 @@ if [[ -z "$BAT" ]]; then
   exit 1
 fi
 
-if (($# != 2)); then
-  echo "usage: charge-limit-apply <start|end> <0-100>" >&2
+END_FILE="$BAT/charge_control_end_threshold"
+START_FILE="$BAT/charge_control_start_threshold"
+
+if (($# != 1)); then
+  echo "usage: charge-limit-apply <check|saver|full>" >&2
   exit 2
 fi
 
 case "$1" in
-  start) file="$BAT/charge_control_start_threshold" ;;
-  end)   file="$BAT/charge_control_end_threshold" ;;
-  *)     echo "charge-limit-apply: kind must be start or end" >&2; exit 2 ;;
+  check) : ;;
+  saver) TARGET_END=80; TARGET_START=75 ;;
+  full)  TARGET_END=100; TARGET_START=99 ;;
+  *) echo "charge-limit-apply: mode must be check, saver or full" >&2; exit 2 ;;
 esac
 
-if [[ ! "$2" =~ ^[0-9]{1,3}$ ]] || (( $2 < 0 || $2 > 100 )); then
-  echo "charge-limit-apply: value must be 0-100" >&2
-  exit 2
+MODE="$1"
+
+read_pair() {
+  local end start
+  end="$(<"$END_FILE")" || return 1
+  start="$(<"$START_FILE")" || return 1
+  [[ "$end" =~ ^[0-9]+$ && "$start" =~ ^[0-9]+$ ]] || return 1
+  printf '%s %s\n' "$end" "$start"
+}
+
+# One ordered write pass based on a fresh read. Returns non-zero when a
+# needed write was rejected by the kernel/EC.
+write_pass() {
+  local cur cur_end cur_start
+  cur="$(read_pair)" || return 1
+  cur_end="${cur%% *}"; cur_start="${cur##* }"
+
+  if (( cur_start > TARGET_START )); then
+    # Lowering start first keeps start < end while the end drops.
+    (( cur_start == TARGET_START )) || { echo "$TARGET_START" > "$START_FILE" || return 1; }
+    (( cur_end == TARGET_END ))     || { echo "$TARGET_END"   > "$END_FILE"   || return 1; }
+  else
+    (( cur_end == TARGET_END ))     || { echo "$TARGET_END"   > "$END_FILE"   || return 1; }
+    (( cur_start == TARGET_START )) || { echo "$TARGET_START" > "$START_FILE" || return 1; }
+  fi
+  return 0
+}
+
+# Wait for the EC to settle and confirm the target pair. The first check is
+# immediate so a no-op mode change exits fast.
+verify() {
+  local i cur cur_end cur_start
+  for ((i = 0; i < 6; i++)); do
+    cur="$(read_pair)" || { sleep 1; continue; }
+    cur_end="${cur%% *}"; cur_start="${cur##* }"
+    if (( cur_end == TARGET_END && cur_start == TARGET_START )); then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+if [[ "$MODE" == "check" ]]; then
+  if cur="$(read_pair)"; then
+    echo "end=${cur%% *} start=${cur##* }"
+    exit 0
+  fi
+  echo "charge-limit-apply: cannot read $BAT thresholds" >&2
+  exit 1
 fi
 
-echo "$2" > "$file"
+for ((attempt = 1; attempt <= 4; attempt++)); do
+  if ! write_pass; then
+    sleep 1  # let any in-flight EC transaction settle, then recompute the order
+    continue
+  fi
+  if verify; then
+    exit 0
+  fi
+done
+
+echo "charge-limit-apply: could not apply $MODE thresholds on $BAT" >&2
+exit 1

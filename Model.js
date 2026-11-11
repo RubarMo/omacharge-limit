@@ -2,6 +2,9 @@
 // with plain node by stubbing `module`.
 
 // Threshold pairs. Saver persists; full is a one-shot that reverts on unplug.
+// The write ORDER for each pair is decided by tools/charge-limit-apply from
+// the EC's fresh state, because the kernel rejects a threshold write that
+// would leave start >= end.
 var END_SAVER = 80
 var START_SAVER = 75
 var END_FULL = 100
@@ -13,15 +16,7 @@ function clampInt(raw, fallback) {
   return Math.max(0, Math.min(100, n))
 }
 
-// Parse the two sysfs threshold readings. Returns { end, start } or null.
-function parseThresholds(endRaw, startRaw) {
-  var end = clampInt(endRaw, -1)
-  var start = clampInt(startRaw, -1)
-  if (end < 0 || start < 0) return null
-  return { end: end, start: start }
-}
-
-// Which mode do the live thresholds represent? "full" only when the end
+// Which mode does the live end threshold represent? "full" only when the end
 // stop-point is 100; anything else (including firmware defaults) reads
 // as saver so the widget never claims a full charge it does not hold.
 function modeFor(end) {
@@ -33,12 +28,6 @@ function thresholdsFor(mode) {
   return { end: END_SAVER, start: START_SAVER }
 }
 
-// Write order that keeps start <= end at every intermediate step.
-function writeOrder(current, target) {
-  if (Number(target.start) < Number(current.start)) return ["start", "end"]
-  return ["end", "start"]
-}
-
 if (typeof module !== "undefined") {
   module.exports = {
     END_SAVER: END_SAVER,
@@ -46,9 +35,7 @@ if (typeof module !== "undefined") {
     END_FULL: END_FULL,
     START_FULL: START_FULL,
     clampInt: clampInt,
-    parseThresholds: parseThresholds,
     modeFor: modeFor,
-    thresholdsFor: thresholdsFor,
-    writeOrder: writeOrder
+    thresholdsFor: thresholdsFor
   }
 }

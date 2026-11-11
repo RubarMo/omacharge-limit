@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "rubar.omacharge-limit",
   "name": "Omacharge Limit",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "rubar",
   "license": "MIT",
   "description": "Battery charge limit switch: 80% saver by default, one-shot 100% that reverts on unplug.",

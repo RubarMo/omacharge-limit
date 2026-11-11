@@ -19,13 +19,13 @@ echo "Installing $HELPER_DST (needs sudo)..."
 sudo install -o root -g root -m 0755 "$HELPER_SRC" "$HELPER_DST"
 
 echo "Adding passwordless sudo rule for the helper only..."
-RULE="$(whoami) ALL=(root) NOPASSWD: $HELPER_DST start [0-9]*, $HELPER_DST end [0-9]*"
+RULE="$(whoami) ALL=(root) NOPASSWD: $HELPER_DST check, $HELPER_DST saver, $HELPER_DST full"
 echo "$RULE" | sudo tee "$RULE_FILE" > /dev/null
 sudo chmod 0440 "$RULE_FILE"
 sudo visudo -c
 
 echo "Verifying..."
-if sudo -n "$HELPER_DST" end "$(cat /sys/class/power_supply/BAT0/charge_control_end_threshold)"; then
+if sudo -n "$HELPER_DST" check; then
   echo "OK: helper works without a password."
 else
   echo "FAILED: helper still asks for a password." >&2

@@ -1,5 +1,4 @@
 import QtQuick
-import Quickshell
 import Quickshell.Io
 import Quickshell.Services.UPower
 import "Model.js" as Model
@@ -7,23 +6,36 @@ import "Model.js" as Model
 // Owns the live charge-limit state. Reads go through a short cat process:
 // sysfs pseudo-files misbehave under FileView watchers (transient empty
 // reads flapped the widget into "unsupported"). Polling is deterministic.
+//
+// Mode changes are a single helper invocation. The helper reads the fresh
+// EC state, writes the start/end pair in an order that keeps start < end at
+// every step, then verifies the settled result before reporting success.
+// Computing the order in QML from cached sysfs values used to write the end
+// threshold first while the EC still held start=99 — the kernel rejects
+// that with EINVAL, the transition aborted, and the EC stayed stuck at 100%
+// with the unplug-revert disarmed.
 Item {
   id: root
 
-  // Live values, -1 while unknown.
+  // Live end threshold, -1 while unknown.
   property int endLimit: -1
-  property int startLimit: -1
   // "saver", "full", or "" while loading.
   property string mode: ""
   property bool supported: true
   property bool busy: false
   property string lastError: ""
-  // The one-shot request: revert to saver on the next unplug.
-  property bool fullArmed: false
+  // Set when the charger leaves while the EC may still hold the one-shot
+  // 100% limit; cleared once a read confirms the limit is no longer full.
+  property bool revertPending: false
+  property int revertAttempts: 0
 
   readonly property string sysfsDir: "/sys/class/power_supply/BAT0"
   readonly property string endPath: sysfsDir + "/charge_control_end_threshold"
-  readonly property string startPath: sysfsDir + "/charge_control_start_threshold"
+  readonly property string helper: "/usr/local/bin/charge-limit-apply"
+  readonly property int maxRevertAttempts: 3
+
+  property string pendingMode: ""
+  property int readFailures: 0
 
   function refresh() {
     if (readProc.running) return
@@ -36,78 +48,67 @@ Item {
   }
 
   function applyMode(next) {
+    if (next !== "saver" && next !== "full") return false
     lastError = ""
     errorTimer.stop()
-    var shown = busy ? pendingMode : mode
-    if (busy || writeProc.running || next === shown) return
+    if (busy || writeProc.running) return false
+    if (next === mode) return false
     if (!supported || endLimit < 0) {
       flagError("no-interface")
-      return
+      return false
     }
-    var target = Model.thresholdsFor(next)
-    var order = Model.writeOrder({ end: endLimit, start: startLimit }, target)
     busy = true
     pendingMode = next
-    writeQueue = order.map(function(key) {
-      return { kind: key, value: key === "start" ? String(target.start) : String(target.end) }
-    })
-    runNextWrite()
-  }
-
-  property string pendingMode: ""
-  property var writeQueue: []
-
-  function runNextWrite() {
-    if (writeQueue.length === 0) {
-      busy = false
-      if (pendingMode === "full") fullArmed = true
-      else if (pendingMode === "saver") fullArmed = false
-      pendingMode = ""
-      refresh()
-      return
-    }
-    var next = writeQueue[0]
-    writeQueue = writeQueue.slice(1)
-    writeProc.command = ["sudo", "-n", "/usr/local/bin/charge-limit-apply", next.kind, next.value]
+    writeProc.command = ["sudo", "-n", helper, next]
     writeProc.running = true
+    return true
   }
 
-  // Revert the one-shot full charge when the charger leaves.
-  function onPowerSourceChanged() {
-    if (UPower.onBattery && fullArmed && !busy && !writeProc.running) {
-      applyMode("saver")
-    }
+  // One dispatch of the owed saver revert. Bounded so a persistently
+  // unhappy EC cannot spin the helper forever; replugging or clicking
+  // saver always gives it a fresh chance.
+  function revertToSaver() {
+    if (!revertPending) return false
+    if (revertAttempts >= maxRevertAttempts) return false
+    if (!UPower.onBattery) return false
+    if (busy || writeProc.running) return false
+    if (endLimit !== 100 || mode !== "full") return false
+    if (!applyMode("saver")) return false
+    revertAttempts++
+    return true
   }
 
   Process {
     id: readProc
-    command: ["cat", root.endPath, root.startPath]
+    command: ["cat", root.endPath]
     stdout: StdioCollector {
       id: readOut
       waitForEnd: true
     }
     onExited: function(code) {
       if (code !== 0) {
-        root.supported = false
+        // Transient EC hiccups happen; only report unsupported after
+        // several consecutive failures so one bad poll doesn't kill the
+        // widget until the next shell restart.
+        if (++root.readFailures >= 3) root.supported = false
         return
       }
-      var lines = String(readOut.text || "").split("\n")
-      var kept = []
-      for (var i = 0; i < lines.length; i++) {
-        var t = String(lines[i] || "").trim()
-        if (t !== "") kept.push(t)
-      }
-      var parsed = Model.parseThresholds(kept[0], kept[1])
-      if (!parsed) {
-        root.supported = false
+      var end = Model.clampInt(readOut.text, -1)
+      if (end < 0) {
+        if (++root.readFailures >= 3) root.supported = false
         return
       }
+      root.readFailures = 0
       root.supported = true
-      root.endLimit = parsed.end
-      root.startLimit = parsed.start
-      // While a write is in flight the panel shows the optimistic target.
-      if (!root.busy) root.mode = Model.modeFor(parsed.end)
-      if (root.mode === "saver") root.fullArmed = false
+      root.endLimit = end
+      if (!root.busy) root.mode = Model.modeFor(end)
+      // Charger left and the EC still reads 100: dispatch the owed revert.
+      // Reads that land mid-apply are skipped by the busy guards; the
+      // post-apply refresh re-checks.
+      if (root.revertPending && !root.busy && !writeProc.running) {
+        if (end !== 100) root.revertPending = false
+        else root.revertToSaver()
+      }
     }
   }
 
@@ -117,22 +118,34 @@ Item {
       waitForEnd: true
     }
     onExited: function(code) {
+      var applied = root.pendingMode
+      root.busy = false
+      root.pendingMode = ""
       if (code !== 0) {
-        root.busy = false
-        root.writeQueue = []
-        root.pendingMode = ""
         root.flagError("write")
-        root.refresh()
+        // A failed saver apply may leave the EC at 100 while on battery;
+        // keep the owed revert alive and let the retry timer take it.
+        if (applied === "saver") root.revertPending = true
         return
       }
-      root.runNextWrite()
+      // The helper verified the settled EC state before exiting, so the
+      // values are readable back reliably right away.
+      root.refresh()
     }
   }
 
   Connections {
     target: UPower
     function onOnBatteryChanged() {
-      root.onPowerSourceChanged()
+      root.revertAttempts = 0
+      if (UPower.onBattery) {
+        root.revertPending = true
+        // Fast path: the cached read already says 100. The post-apply
+        // refresh settles the rest either way.
+        root.revertToSaver()
+      } else {
+        root.revertPending = false
+      }
       root.refresh()
     }
   }
@@ -142,6 +155,16 @@ Item {
     id: errorTimer
     interval: 6000
     onTriggered: root.lastError = ""
+  }
+
+  // Retries an owed revert every few seconds until a read confirms the
+  // limit dropped (or the attempt budget is spent).
+  Timer {
+    id: revertRetryTimer
+    interval: 5000
+    repeat: true
+    running: root.revertPending && root.revertAttempts < root.maxRevertAttempts
+    onTriggered: root.revertToSaver()
   }
 
   // Slow poll keeps the bar pill honest against external changes
@@ -166,5 +189,10 @@ Item {
     fastPoll.running = on
   }
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    // A leftover one-shot full charge from before a reboot or hibernate
+    // still owes its revert if the shell comes up on battery.
+    revertPending = UPower.onBattery
+    refresh()
+  }
 }
