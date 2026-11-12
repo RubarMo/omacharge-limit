@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup for the rubar.charge-limit widget: installs the root-owned
+# One-time setup for the rubar.omacharge-limit widget: installs the root-owned
 # write helper and a strict passwordless sudo rule scoped to that helper.
 # Run interactively (you will be asked for your password once):
 #   tools/install-helper.sh
@@ -32,4 +32,4 @@ else
   exit 1
 fi
 
-echo "Done. Add the widget to your bar: omarchy plugin enable rubar.charge-limit"
+echo "Done. Add the widget to your bar: omarchy plugin enable rubar.omacharge-limit"

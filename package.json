@@ -1,0 +1,10 @@
+{
+  "name": "omacharge-limit",
+  "version": "1.1.1",
+  "description": "Battery charge limit switch for Omarchy",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "author": "rubar",
+  "license": "MIT"
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Root-owned write helper for the rubar.charge-limit bar widget.
+# Root-owned write helper for the rubar.omacharge-limit bar widget.
 # Installed to /usr/local/bin/charge-limit-apply (root:root 0755) by
 # tools/install-helper.sh. Invoked via passwordless sudo from the shell:
 #   sudo -n /usr/local/bin/charge-limit-apply <check|saver|full>
@@ -21,6 +21,7 @@
 #     invocation).
 
 set -euo pipefail
+trap 'exit 143' TERM INT
 
 SYSFS_ROOT="${CHARGE_LIMIT_SYSFS:-/sys/class/power_supply}"
 

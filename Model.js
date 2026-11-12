@@ -6,7 +6,8 @@
 var END_FULL = 100
 
 function clampInt(raw, fallback) {
-  var n = parseInt(String(raw || "").trim(), 10)
+  var s = String(raw || "").trim().slice(0, 16)
+  var n = parseInt(s, 10)
   if (isNaN(n)) return fallback
   return Math.max(0, Math.min(100, n))
 }

@@ -3,7 +3,7 @@ import Quickshell.Io
 import Quickshell.Services.UPower
 import "Model.js" as Model
 
-// Owns the live charge-limit state. Reads go through a short cat process:
+// Owns the live charge-limit state. Reads go through a short head process:
 // sysfs pseudo-files misbehave under FileView watchers (transient empty
 // reads flapped the widget into "unsupported"). Polling is deterministic.
 //
@@ -32,22 +32,55 @@ Item {
   // values, so reads are not trusted for mode changes in that window.
   property bool settling: false
 
-  readonly property string sysfsDir: "/sys/class/power_supply/BAT0"
-  readonly property string endPath: sysfsDir + "/charge_control_end_threshold"
-  readonly property string helper: "/usr/local/bin/charge-limit-apply"
+  property string sysfsDir: "/sys/class/power_supply/BAT0"
+  property string endPath: sysfsDir + "/charge_control_end_threshold"
+  property string helper: "/usr/local/bin/charge-limit-apply"
   readonly property int maxRevertAttempts: 3
+
+  // Watchdog deadlines for process operations (bounded execution)
+  property int readTimeoutMs: 2500
+  property int writeTimeoutMs: 6000
 
   property string pendingMode: ""
   property int readFailures: 0
+  property bool readPending: false
 
   function refresh() {
-    if (readProc.running) return
+    if (readProc.running || readPending) return
+    readPending = true
+    readWatchdog.restart()
     readProc.running = true
   }
 
   function flagError(kind) {
     lastError = kind
     errorTimer.restart()
+  }
+
+  function abortRead() {
+    readWatchdog.stop()
+    if (readProc.running) {
+      readProc.running = false
+      readProc.signal(15)
+    }
+    if (root.readPending) {
+      root.readPending = false
+      if (++root.readFailures >= 3) root.supported = false
+    }
+  }
+
+  function abortWrite(reason) {
+    writeWatchdog.stop()
+    var applied = root.pendingMode
+    if (writeProc.running) {
+      writeProc.running = false
+      writeProc.signal(15)
+    }
+    if (!root.busy) return
+    root.busy = false
+    root.pendingMode = ""
+    root.flagError(reason || "write")
+    if (applied === "saver") root.revertPending = true
   }
 
   function applyMode(next) {
@@ -63,6 +96,7 @@ Item {
     busy = true
     pendingMode = next
     writeProc.command = ["sudo", "-n", helper, next]
+    writeWatchdog.restart()
     writeProc.running = true
     return true
   }
@@ -83,12 +117,15 @@ Item {
 
   Process {
     id: readProc
-    command: ["cat", root.endPath]
+    command: ["head", "-c", "32", root.endPath]
     stdout: StdioCollector {
       id: readOut
       waitForEnd: true
     }
     onExited: function(code) {
+      readWatchdog.stop()
+      if (!root.readPending) return
+      root.readPending = false
       if (code !== 0) {
         // Transient EC hiccups happen; only report unsupported after
         // several consecutive failures so one bad poll doesn't kill the
@@ -96,7 +133,8 @@ Item {
         if (++root.readFailures >= 3) root.supported = false
         return
       }
-      var end = Model.clampInt(readOut.text, -1)
+      var raw = String(readOut.text || "").slice(0, 32)
+      var end = Model.clampInt(raw, -1)
       if (end < 0) {
         if (++root.readFailures >= 3) root.supported = false
         return
@@ -113,14 +151,34 @@ Item {
         else root.revertToSaver()
       }
     }
+    onRunningChanged: {
+      if (!running) {
+        readWatchdog.stop()
+        // FailedToStart contract: running emitted false without exited
+        if (root.readPending) {
+          root.readPending = false
+          if (++root.readFailures >= 3) root.supported = false
+        }
+      }
+    }
+  }
+
+  Timer {
+    id: readWatchdog
+    interval: root.readTimeoutMs
+    repeat: false
+    onTriggered: root.abortRead()
   }
 
   Process {
     id: writeProc
     stderr: StdioCollector {
+      id: writeErr
       waitForEnd: true
     }
     onExited: function(code) {
+      writeWatchdog.stop()
+      if (!root.busy) return
       var applied = root.pendingMode
       root.busy = false
       root.pendingMode = ""
@@ -137,6 +195,26 @@ Item {
       root.settling = true
       settleTimer.restart()
     }
+    onRunningChanged: {
+      if (!running) {
+        writeWatchdog.stop()
+        // FailedToStart contract: running emitted false without exited
+        if (root.busy) {
+          var applied = root.pendingMode
+          root.busy = false
+          root.pendingMode = ""
+          root.flagError("write")
+          if (applied === "saver") root.revertPending = true
+        }
+      }
+    }
+  }
+
+  Timer {
+    id: writeWatchdog
+    interval: root.writeTimeoutMs
+    repeat: false
+    onTriggered: root.abortWrite("write")
   }
 
   // Post-write settle window: reads during it are not trusted for mode
@@ -210,5 +288,20 @@ Item {
     // still owes its revert if the shell comes up on battery.
     revertPending = UPower.onBattery
     refresh()
+  }
+
+  Component.onDestruction: {
+    readWatchdog.stop()
+    writeWatchdog.stop()
+    errorTimer.stop()
+    settleTimer.stop()
+    if (readProc.running) {
+      readProc.running = false
+      readProc.signal(15)
+    }
+    if (writeProc.running) {
+      writeProc.running = false
+      writeProc.signal(15)
+    }
   }
 }

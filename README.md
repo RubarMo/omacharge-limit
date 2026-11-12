@@ -20,7 +20,7 @@ omarchy plugin add https://github.com/RubarMo/omacharge-limit.git --enable
 Then run the one-time helper setup (needs sudo):
 
 ```bash
-~/.config/omarchy/plugins/rubar.charge-limit/tools/install-helper.sh
+~/.config/omarchy/plugins/rubar.omacharge-limit/tools/install-helper.sh
 ```
 
 This installs `/usr/local/bin/charge-limit-apply` (root-owned) and a strict passwordless sudo rule scoped to that binary. Re-run it after every plugin update so the installed helper matches the plugin version.
