@@ -28,7 +28,7 @@ function runQuickshellTest(qmlContent, timeoutMs = 8000) {
   }
 }
 
-test("lifecycle: failed start settles busy and pending state under FailedToStart contract", () => {
+test("lifecycle: failed start settles busy and pending state", () => {
   const qml = `
 import QtQuick
 import Quickshell
@@ -38,8 +38,8 @@ ShellRoot {
   Plugin.Service {
     id: svc
     helper: "/nonexistent/path/to/charge-limit-apply"
-    readTimeoutMs: 1000
-    writeTimeoutMs: 2000
+    sudoPrefix: []
+    writeTimeoutSec: 2
     supported: true
     endLimit: 100
     mode: "full"
@@ -71,13 +71,13 @@ ShellRoot {
   assert.strictEqual(res.status, 0, `Quickshell exited with ${res.status}: ${res.output}`);
   assert.ok(res.output.includes("APPLY_CALLED: true"), "applyMode should have been called");
   assert.ok(res.output.includes("SETTLED_BUSY: false"), "busy must be settled to false on failed start");
-  assert.ok(res.output.includes("SETTLED_PENDING: "), "pendingMode must be cleared");
+  assert.match(res.output, /SETTLED_PENDING: *\n/, "pendingMode must be cleared");
   assert.ok(res.output.includes("SETTLED_ERROR: write"), "lastError must be flagged 'write'");
   assert.ok(res.output.includes("SETTLED_REVERT: true"), "revertPending must be kept on failed saver apply");
 });
 
-test("lifecycle: read watchdog deadline terminates a hung read and increments failures", () => {
-  // Create a FIFO that never outputs data to simulate an uninterruptible/stalled read
+test("lifecycle: read deadline terminates a hung read and counts a failure", () => {
+  // A FIFO with no writer stalls the read the way a hung sysfs file would
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "fifo-test-"));
   const fifoPath = path.join(tmpDir, "hung_fifo");
   spawnSync("mkfifo", [fifoPath]);
@@ -91,8 +91,7 @@ ShellRoot {
   Plugin.Service {
     id: svc
     endPath: "${fifoPath}"
-    readTimeoutMs: 300
-    writeTimeoutMs: 2000
+    readTimeoutSec: 1
   }
 
   Timer {
@@ -105,7 +104,7 @@ ShellRoot {
   }
 
   Timer {
-    interval: 700
+    interval: 2000
     running: true
     onTriggered: {
       console.log("READ_PENDING_AFTER_TIMEOUT: " + svc.readPending)
@@ -119,18 +118,23 @@ ShellRoot {
     const res = runQuickshellTest(qml);
     assert.strictEqual(res.status, 0, `Quickshell exited with ${res.status}: ${res.output}`);
     assert.ok(res.output.includes("READ_PENDING_INITIAL: true"), "read should start pending");
-    assert.ok(res.output.includes("READ_PENDING_AFTER_TIMEOUT: false"), "read watchdog must reset readPending");
-    assert.ok(res.output.includes("READ_FAILURES: 1"), "watchdog timeout must increment readFailures");
+    assert.ok(res.output.includes("READ_PENDING_AFTER_TIMEOUT: false"), "read deadline must reset readPending");
+    assert.ok(res.output.includes("READ_FAILURES: 1"), "deadline expiry must count as a read failure");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("lifecycle: write watchdog deadline terminates a stalled apply and cleans up", () => {
-  // Create a mock helper that sleeps forever
+test("lifecycle: write deadline kills a stalled helper and settles state", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "stall-helper-"));
   const mockHelper = path.join(tmpDir, "stall-apply");
-  fs.writeFileSync(mockHelper, "#!/bin/sh\ntrap 'exit 143' TERM INT\nsleep 60\n", { mode: 0o755 });
+  const pidFile = path.join(tmpDir, "helper.pid");
+  // sleep runs in the background so the TERM trap fires while it waits
+  fs.writeFileSync(
+    mockHelper,
+    `#!/bin/sh\necho $$ > "${pidFile}"\ntrap 'kill $! 2>/dev/null; exit 143' TERM INT\nsleep 60 & wait $!\n`,
+    { mode: 0o755 }
+  );
 
   const qml = `
 import QtQuick
@@ -141,8 +145,8 @@ ShellRoot {
   Plugin.Service {
     id: svc
     helper: "${mockHelper}"
-    writeTimeoutMs: 400
-    readTimeoutMs: 2000
+    sudoPrefix: []
+    writeTimeoutSec: 1
     supported: true
     endLimit: 100
     mode: "full"
@@ -158,7 +162,7 @@ ShellRoot {
   }
 
   Timer {
-    interval: 900
+    interval: 2000
     running: true
     onTriggered: {
       console.log("TIMEOUT_BUSY: " + svc.busy)
@@ -174,22 +178,24 @@ ShellRoot {
     const res = runQuickshellTest(qml);
     assert.strictEqual(res.status, 0, `Quickshell exited with ${res.status}: ${res.output}`);
     assert.ok(res.output.includes("APPLY_STARTED_BUSY: true"), "applyMode should have set busy = true");
-    assert.ok(res.output.includes("TIMEOUT_BUSY: false"), "watchdog must clear busy state on timeout");
-    assert.ok(res.output.includes("TIMEOUT_PENDING: "), "watchdog must clear pendingMode");
-    assert.ok(res.output.includes("TIMEOUT_ERROR: write"), "watchdog must flag error");
+    assert.ok(res.output.includes("TIMEOUT_BUSY: false"), "deadline must clear busy state");
+    assert.ok(res.output.includes("TIMEOUT_ERROR: write"), "deadline must flag error");
     assert.ok(res.output.includes("TIMEOUT_REVERT: true"), "saver revert must remain pending on timeout");
+    assert.ok(fs.existsSync(pidFile), "mock helper must have started");
+    const pid = fs.readFileSync(pidFile, "utf8").trim();
+    assert.notStrictEqual(spawnSync("kill", ["-0", pid]).status, 0, "stalled helper must be gone after the deadline");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("lifecycle: unload/cancellation cleanly terminates in-flight operations", () => {
+test("lifecycle: unload terminates an in-flight helper", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cancel-test-"));
   const mockHelper = path.join(tmpDir, "long-helper");
   const pidFile = path.join(tmpDir, "helper.pid");
   fs.writeFileSync(
     mockHelper,
-    `#!/bin/sh\necho $$ > "${pidFile}"\ntrap 'exit 143' TERM INT\nsleep 60\n`,
+    `#!/bin/sh\necho $$ > "${pidFile}"\ntrap 'kill $! 2>/dev/null; exit 143' TERM INT\nsleep 60 & wait $!\n`,
     { mode: 0o755 }
   );
 
@@ -207,7 +213,8 @@ ShellRoot {
     id: svcComp
     Plugin.Service {
       helper: "${mockHelper}"
-      writeTimeoutMs: 10000
+      sudoPrefix: []
+      writeTimeoutSec: 10
       supported: true
       endLimit: 100
       mode: "full"
@@ -249,20 +256,9 @@ ShellRoot {
     assert.strictEqual(res.status, 0, `Quickshell exited with ${res.status}: ${res.output}`);
     assert.ok(res.output.includes("HELPER_DISPATCHED"), "helper should be dispatched");
     assert.ok(res.output.includes("DESTROYING_SERVICE"), "service destruction should be triggered");
-
-    // Check if the spawned helper process was killed
-    if (fs.existsSync(pidFile)) {
-      const pid = fs.readFileSync(pidFile, "utf8").trim();
-      if (pid) {
-        // Checking if PID still exists
-        const check = spawnSync("kill", ["-0", pid]);
-        assert.notStrictEqual(
-          check.status,
-          0,
-          `Process ${pid} should have been terminated on component destruction`
-        );
-      }
-    }
+    assert.ok(fs.existsSync(pidFile), "mock helper must have started before unload");
+    const pid = fs.readFileSync(pidFile, "utf8").trim();
+    assert.notStrictEqual(spawnSync("kill", ["-0", pid]).status, 0, `Process ${pid} should have been terminated on unload`);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -283,7 +279,7 @@ ShellRoot {
   Plugin.Service {
     id: svc
     endPath: "${largeFile}"
-    readTimeoutMs: 2000
+    readTimeoutSec: 2
   }
 
   Timer {

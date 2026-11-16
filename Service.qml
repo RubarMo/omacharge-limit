@@ -37,9 +37,13 @@ Item {
   property string helper: "/usr/local/bin/charge-limit-apply"
   readonly property int maxRevertAttempts: 3
 
-  // Watchdog deadlines for process operations (bounded execution)
-  property int readTimeoutMs: 2500
-  property int writeTimeoutMs: 6000
+  // Hard deadlines come from timeout(1), which kills the sudo/helper chain on
+  // expiry and exits non-zero, so the normal exit paths settle busy and failures.
+  // shortcut: a helper stuck in kernel I/O can outlive the KILL sent to sudo, upgrade to a systemd transient unit if a stalled write is seen in practice.
+  property int readTimeoutSec: 2
+  property int writeTimeoutSec: 6
+  // Test seam: mock helpers run without sudo when this is empty.
+  property var sudoPrefix: ["sudo", "-n"]
 
   property string pendingMode: ""
   property int readFailures: 0
@@ -48,39 +52,12 @@ Item {
   function refresh() {
     if (readProc.running || readPending) return
     readPending = true
-    readWatchdog.restart()
     readProc.running = true
   }
 
   function flagError(kind) {
     lastError = kind
     errorTimer.restart()
-  }
-
-  function abortRead() {
-    readWatchdog.stop()
-    if (readProc.running) {
-      readProc.running = false
-      readProc.signal(15)
-    }
-    if (root.readPending) {
-      root.readPending = false
-      if (++root.readFailures >= 3) root.supported = false
-    }
-  }
-
-  function abortWrite(reason) {
-    writeWatchdog.stop()
-    var applied = root.pendingMode
-    if (writeProc.running) {
-      writeProc.running = false
-      writeProc.signal(15)
-    }
-    if (!root.busy) return
-    root.busy = false
-    root.pendingMode = ""
-    root.flagError(reason || "write")
-    if (applied === "saver") root.revertPending = true
   }
 
   function applyMode(next) {
@@ -95,8 +72,7 @@ Item {
     }
     busy = true
     pendingMode = next
-    writeProc.command = ["sudo", "-n", helper, next]
-    writeWatchdog.restart()
+    writeProc.command = ["timeout", "-k", "1", String(writeTimeoutSec)].concat(sudoPrefix, [helper, next])
     writeProc.running = true
     return true
   }
@@ -117,13 +93,12 @@ Item {
 
   Process {
     id: readProc
-    command: ["head", "-c", "32", root.endPath]
+    command: ["timeout", "-k", "1", String(root.readTimeoutSec), "head", "-c", "32", root.endPath]
     stdout: StdioCollector {
       id: readOut
       waitForEnd: true
     }
     onExited: function(code) {
-      readWatchdog.stop()
       if (!root.readPending) return
       root.readPending = false
       if (code !== 0) {
@@ -152,32 +127,17 @@ Item {
       }
     }
     onRunningChanged: {
-      if (!running) {
-        readWatchdog.stop()
-        // FailedToStart contract: running emitted false without exited
-        if (root.readPending) {
-          root.readPending = false
-          if (++root.readFailures >= 3) root.supported = false
-        }
+      // FailedToStart contract: running emitted false without exited
+      if (!running && root.readPending) {
+        root.readPending = false
+        if (++root.readFailures >= 3) root.supported = false
       }
     }
   }
 
-  Timer {
-    id: readWatchdog
-    interval: root.readTimeoutMs
-    repeat: false
-    onTriggered: root.abortRead()
-  }
-
   Process {
     id: writeProc
-    stderr: StdioCollector {
-      id: writeErr
-      waitForEnd: true
-    }
     onExited: function(code) {
-      writeWatchdog.stop()
       if (!root.busy) return
       var applied = root.pendingMode
       root.busy = false
@@ -196,25 +156,15 @@ Item {
       settleTimer.restart()
     }
     onRunningChanged: {
-      if (!running) {
-        writeWatchdog.stop()
-        // FailedToStart contract: running emitted false without exited
-        if (root.busy) {
-          var applied = root.pendingMode
-          root.busy = false
-          root.pendingMode = ""
-          root.flagError("write")
-          if (applied === "saver") root.revertPending = true
-        }
+      // FailedToStart contract: running emitted false without exited
+      if (!running && root.busy) {
+        var applied = root.pendingMode
+        root.busy = false
+        root.pendingMode = ""
+        root.flagError("write")
+        if (applied === "saver") root.revertPending = true
       }
     }
-  }
-
-  Timer {
-    id: writeWatchdog
-    interval: root.writeTimeoutMs
-    repeat: false
-    onTriggered: root.abortWrite("write")
   }
 
   // Post-write settle window: reads during it are not trusted for mode
@@ -288,20 +238,5 @@ Item {
     // still owes its revert if the shell comes up on battery.
     revertPending = UPower.onBattery
     refresh()
-  }
-
-  Component.onDestruction: {
-    readWatchdog.stop()
-    writeWatchdog.stop()
-    errorTimer.stop()
-    settleTimer.stop()
-    if (readProc.running) {
-      readProc.running = false
-      readProc.signal(15)
-    }
-    if (writeProc.running) {
-      writeProc.running = false
-      writeProc.signal(15)
-    }
   }
 }
