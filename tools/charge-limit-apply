@@ -9,9 +9,11 @@
 #
 # Design notes:
 #   * The kernel rejects a threshold write that would leave start >= end,
-#     so before lowering end the helper first drops a conflicting start
-#     threshold. In the common case ONLY the end threshold is written —
-#     one EC transaction per mode change.
+#     so the helper orders the start/end writes from fresh state to keep
+#     start < end at every step, and skips values that already match.
+#     Full mode sets start=99 as well as end=100 so ThinkPad ECs actually
+#     start charging when the battery is already above saver's 75% start
+#     threshold (e.g. sitting at 79-80%).
 #   * The EC churns for a moment after a write and can report stale values;
 #     the helper therefore does NOT read back after a successful write pass
 #     (polling a busy EC stalls the kernel and, on ThinkPads, EC-sourced
@@ -48,8 +50,8 @@ fi
 
 case "$1" in
   check) : ;;
-  saver) TARGET_END=80 ;;
-  full)  TARGET_END=100 ;;
+  saver) TARGET_END=80; TARGET_START=75 ;;
+  full)  TARGET_END=100; TARGET_START=99 ;;
   *) echo "charge-limit-apply: mode must be check, saver or full" >&2; exit 2 ;;
 esac
 
@@ -70,11 +72,15 @@ write_pass() {
   cur="$(read_pair)" || return 1
   cur_end="${cur%% *}"; cur_start="${cur##* }"
 
-  if (( cur_start >= TARGET_END )); then
-    # A conflicting start threshold must drop before end can.
-    (( cur_start == 75 )) || { echo "75" > "$START_FILE" || return 1; }
+  if (( cur_start > TARGET_START )); then
+    # Lowering start first keeps start < end while end drops.
+    (( cur_start == TARGET_START )) || { echo "$TARGET_START" > "$START_FILE" || return 1; }
+    (( cur_end == TARGET_END ))     || { echo "$TARGET_END"   > "$END_FILE"   || return 1; }
+  else
+    # Raising end first keeps start < end while start rises.
+    (( cur_end == TARGET_END ))     || { echo "$TARGET_END"   > "$END_FILE"   || return 1; }
+    (( cur_start == TARGET_START )) || { echo "$TARGET_START" > "$START_FILE" || return 1; }
   fi
-  (( cur_end == TARGET_END )) || { echo "$TARGET_END" > "$END_FILE" || return 1; }
   return 0
 }
 

@@ -35,7 +35,7 @@ This installs `/usr/local/bin/charge-limit-apply` (root-owned) and a strict pass
 
 Reads `/sys/class/power_supply/BAT0/charge_control_end_threshold` (polling every 15s, 3s with the panel open) and watches `UPower.onBattery` for the auto-revert.
 
-Mode changes are one `sudo -n charge-limit-apply saver|full` call. The helper writes the end threshold in a single EC transaction (dropping a conflicting start threshold first when needed) and deliberately does **not** read back afterwards: the EC churns for a moment after a write and polls of a busy EC stall the kernel — and on ThinkPads, EC-sourced input. The widget waits ~3s (settle window) before its confirming refresh. Manual/debug use:
+Mode changes are one `sudo -n charge-limit-apply saver|full` call. The helper writes the start/end thresholds in constraint-safe order (`start < end` at every step, skipping values that already match) and deliberately does **not** read back afterwards: the EC churns for a moment after a write and polls of a busy EC stall the kernel — and on ThinkPads, EC-sourced input. The widget waits ~3s (settle window) before its confirming refresh. Manual/debug use:
 
 ```bash
 sudo charge-limit-apply check   # read-only: prints the current thresholds

@@ -63,8 +63,8 @@ test("charge-limit-apply check prints current thresholds", () => {
   }
 });
 
-test("charge-limit-apply saver sets end threshold to 80 and drops start threshold if >= 80", () => {
-  const mock = makeMockSysfs("100", "95");
+test("charge-limit-apply saver sets end=80 and start=75", () => {
+  const mock = makeMockSysfs("100", "99");
   try {
     execSync(`"${HELPER}" saver`, {
       env: { ...process.env, CHARGE_LIMIT_SYSFS: mock.tmpDir },
@@ -79,7 +79,7 @@ test("charge-limit-apply saver sets end threshold to 80 and drops start threshol
   }
 });
 
-test("charge-limit-apply full sets end threshold to 100", () => {
+test("charge-limit-apply full sets end=100 and start=99", () => {
   const mock = makeMockSysfs("80", "75");
   try {
     execSync(`"${HELPER}" full`, {
@@ -87,7 +87,25 @@ test("charge-limit-apply full sets end threshold to 100", () => {
       stdio: "pipe",
     });
     const end = fs.readFileSync(mock.endPath, "utf8").trim();
+    const start = fs.readFileSync(mock.startPath, "utf8").trim();
     assert.strictEqual(end, "100");
+    assert.strictEqual(start, "99");
+  } finally {
+    mock.cleanup();
+  }
+});
+
+test("charge-limit-apply full raises start=99 even when end is already 100", () => {
+  const mock = makeMockSysfs("100", "75");
+  try {
+    execSync(`"${HELPER}" full`, {
+      env: { ...process.env, CHARGE_LIMIT_SYSFS: mock.tmpDir },
+      stdio: "pipe",
+    });
+    const end = fs.readFileSync(mock.endPath, "utf8").trim();
+    const start = fs.readFileSync(mock.startPath, "utf8").trim();
+    assert.strictEqual(end, "100");
+    assert.strictEqual(start, "99");
   } finally {
     mock.cleanup();
   }
